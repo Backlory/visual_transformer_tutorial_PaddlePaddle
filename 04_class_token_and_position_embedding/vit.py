@@ -65,7 +65,7 @@ class PatchEmbedding(nn.Layer):
         x = x.transpose([0, 2, 1])      # [n图, embed_dim, n_patches] -> [n图, n_patches, embed_dim]
         #cls_token和x并在一起
         cls_token = self.cls_token                          # [1, 1 ,embed_dim]
-        cls_token = cls_token.expand([x.shape[0], -1, -1])  #扩展到n个patch上，即[n, 1 ,embed_dim]
+        cls_token = cls_token.expand([x.shape[0], -1, -1])  #扩展到n个图片上，即[n, 1 ,embed_dim]
         x = paddle.concat([cls_token, x], axis = 1)         #[n, 1+n_patches, embed_dim]
         #pos_embed 叠加在【cls_token和x】底下
         x = x + self.position_embed # broadcasting，把[1, n_patches+1, embed_dim]广播叠加到
@@ -75,8 +75,8 @@ class PatchEmbedding(nn.Layer):
 
 
 class Attention(nn.Layer):
-    '''多头注意力，实现模型内部的集成学习，不同头学习到的模式可能是不一样的\n
-    #输入[B, N, embed_dim]，输出[B, N, embed_dim]
+    '''对整张图片执行多头注意力，实现模型内部的集成学习，不同头学习到的模式可能是不一样的\n
+    #输入[B个图, N个patch, embed_dim]，输出[B, N, embed_dim]
     '''
     def __init__(self, embed_dim, num_heads, qkv_bias=False, qk_scale=None, dropout=0., attention_dropout=0.):
         super(Attention, self).__init__()
@@ -89,7 +89,7 @@ class Attention(nn.Layer):
                              bias_attr=False if qkv_bias is False else None)
         self.scale = self.head_dim ** -0.5 if qk_scale is None else qk_scale
         self.softmax = nn.Softmax(-1)
-        self.proj = nn.Linear(self.all_head_dim, self.embed_dim)    #最后把all_head_dim投影到embed_dim，这俩差不多大
+        self.proj = nn.Linear(self.all_head_dim, self.embed_dim)    #最后把all_head_dim投影到embed_dim，共同决策。这俩差不多大
         self.dropout = nn.Dropout(dropout)
         self.attention_dropout = nn.Dropout(attention_dropout)
     def transpose_multi_head(self, x):
@@ -113,7 +113,8 @@ class Attention(nn.Layer):
         #
         attn = paddle.matmul(q, k, transpose_y=True)        # q * k^T: [B, num_heads, N, N]         =[8, 4, 16, 16]
         attn = self.scale * attn                            # 缩放
-        attn = self.softmax(attn)                           # softmax归一化, [B, num_heads, N, N]
+        attn = self.softmax(attn)                           # softmax归一化, [B, num_heads, N, N]。第B个图片，每个头在每个word上的注意力值
+                                                            # word的数量为N×N
         attn_weights = attn
         attn = self.attention_dropout(attn)
         #
@@ -123,7 +124,7 @@ class Attention(nn.Layer):
 
         out = self.proj(out)                                #[B, N, embed_dim]
         out = self.dropout(out) 
-        return out, attn_weights
+        return out, attn_weights        
 
 
 
