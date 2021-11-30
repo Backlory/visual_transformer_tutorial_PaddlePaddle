@@ -5,7 +5,7 @@ Recorded By: Hatimwen
 """
 import paddle
 import paddle.nn as nn
-from mask_1129 import generate_mask
+from mask import generate_mask
 
 paddle.set_device('cpu')
 
