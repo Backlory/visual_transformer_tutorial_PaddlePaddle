@@ -153,7 +153,7 @@ class SwinBlock(nn.Layer):
     def __init__(self, dim, input_resolution, num_heads, window_size):
         super().__init__()
         self.dim = dim
-        self.resolution = input_resolution
+        self.resolution = input_resolution  #原图分成patch后，横纵方向的patch个数
         self.window_size = window_size  #窗口的尺寸
         #
         self.attn_norm = nn.LayerNorm(dim)
@@ -177,6 +177,7 @@ class SwinBlock(nn.Layer):
         # 全图attention，SA
         attn_windows = attn_windows.reshape([-1, self.window_size, self.window_size, C])#-> [所有图片的总窗口数, 窗口纵尺寸, 窗口横尺寸, embed_dim]
         x = i_windows_partition(attn_windows, self.window_size, H, W)   #逆处理，-> [B, 纵视觉词H, 横视觉词W, C=embed_dim]
+        #
         x = x.reshape([B, H*W, C])                          #-> [B张图, patch数, embed_dim]
         x = self.attn(x)                                    #全局attention
         x = h + x

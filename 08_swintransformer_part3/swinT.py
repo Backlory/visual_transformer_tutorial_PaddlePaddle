@@ -8,6 +8,13 @@ from mask import generate_mask
 
 paddle.set_device('cpu')
 
+class Identity(nn.Layer):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
 class PatchEmbedding(nn.Layer):
     '''将一组NCHW的像素图片按尺寸patch_size转换成patch，
     再转换成n*word*embed_dim的视觉词向量，再layerNorm。
@@ -167,7 +174,7 @@ class SwinBlock(nn.Layer):
         self.dim = dim
         self.shift_size = shift_size        # 平移尺度，一般取 0 或者 ws//2
         self.resolution = input_resolution  # 原图分成patch后，横纵方向的patch个数
-        self.ws = ws      # 窗口的尺寸，代表一个window中包含几乘几的patches
+        self.ws = ws                        # 窗口的尺寸，代表一个window中包含几乘几的patches
         #
         self.attn_norm = nn.LayerNorm(dim)
         self.attn = WindowAttention(dim, ws, num_heads)
@@ -176,6 +183,9 @@ class SwinBlock(nn.Layer):
         self.mlp = Mlp(dim)
 
         # 如果有shift_size，就制作mask
+        if min(self.resolution) <= self.ws:                                 #要是移不动了就不移了           
+            self.shift_size = 0
+            self.ws = min(self.resolution)
         if self.shift_size > 0:                                             # [一张图片中的总窗口数, ws*ws, ws*ws]
             attn_mask = generate_mask(ws = self.ws,                         # 7
                                       shift_size = self.shift_size,         # 3
@@ -217,24 +227,94 @@ class SwinBlock(nn.Layer):
         x = h + x
         return x
 
-def main():
-    t = paddle.randn([4, 3, 224, 224])
-    patch_embedding = PatchEmbedding(patch_size=4, embed_dim=96)
-    swin_block_w_msa = SwinBlock(dim=96, input_resolution=[56, 56], num_heads=4, ws=7, shift_size=0)
-    swin_block_sw_msa = SwinBlock(dim=96, input_resolution=[56, 56], num_heads=4, ws=7, shift_size=7//2)
-    patch_merging = PatchMerging(input_resolution=[56, 56], dim=96)
 
-    print('image shape = [4, 3, 224, 224]')
+
+class SwinStage(nn.Layer):
+    '''
+    swin模块，交替使用S-WSA和WSA。
+    SwinBlock * depth，最后加上patch_merging。swinblock在偶数时shift，奇数时不shift
+    '''
+    def __init__(self, dim, input_resolution, depth, num_heads, ws, patch_merging=None):
+        super().__init__()
+        self.blocks = nn.LayerList()
+        for i in range(depth):
+            self.blocks.append(
+                SwinBlock(dim=dim, 
+                          input_resolution=input_resolution,
+                          num_heads=num_heads,
+                          ws=ws,
+                          shift_size=0 if (i % 2 == 0) else ws//2))
+        if patch_merging is None:
+            self.patch_merging = Identity()
+        else:
+            self.patch_merging = patch_merging(input_resolution, dim)
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        x = self.patch_merging(x)
+        return x
+
+
+class SwinTransformer(nn.Layer):
+    '''
+    swin T的最终实现。
+    patch_embedding -> 多个SwinStage -> LayerNorm -> 同一图片的所有windows取平均 -> 展平fc
+    '''
+    def __init__(self,
+                 image_size=224,
+                 patch_size=4,
+                 in_channels=3,
+                 embed_dim=96,
+                 ws=7,
+                 num_heads=[3, 6, 12, 24],  # 各个stage的attention头数
+                 depths=[2, 2, 6, 2],       # 各个stage的深度
+                 num_classes=1000):         # 下游head分类任务时类别
+        super().__init__()
+        self.num_classes = num_classes
+        self.depths = depths
+        self.num_heads = num_heads
+        self.embed_dim = embed_dim
+        self.num_stages = len(depths)
+        self.num_features = int(self.embed_dim * 2**(self.num_stages-1))
+        self.patch_resolution = [image_size // patch_size, image_size // patch_size]
+        self.patch_embedding = PatchEmbedding(patch_size=patch_size, embed_dim=embed_dim)
+
+        self.stages = nn.LayerList()
+        for idx, (depth, num_heads) in enumerate(zip(self.depths, self.num_heads)):
+            stage = SwinStage(dim=int(self.embed_dim * 2**idx),
+                              input_resolution=(self.patch_resolution[0]//(2**idx),
+                                                self.patch_resolution[0]//(2**idx)),
+                              depth=depth,
+                              num_heads=num_heads,
+                              ws=ws,
+                              patch_merging=PatchMerging if (idx < self.num_stages-1) else None)
+            self.stages.append(stage)
+
+        self.norm = nn.LayerNorm(self.num_features)
+        self.avgpool = nn.AdaptiveAvgPool1D(1)
+        self.fc = nn.Linear(self.num_features, self.num_classes)
+
+    def forward(self, x):
+        x = self.patch_embedding(x)
+        for stage in self.stages:
+            x = stage(x)
+        x = self.norm(x)
+        x = x.transpose([0, 2, 1])      # [B, embed_dim, num_windows]
+        x = self.avgpool(x)             # -> [B, embed_dim, 1]，自适应平均值池化，缩放到1×1
+        x = x.flatten(1)                # 展平送入全连接层
+        x = self.fc(x)
+        return x
+
+
+def main():
+    t = paddle.randn((4, 3, 224, 224))
+    model = SwinTransformer()
+    print(model)
+    out = model(t)
+    print(out.shape)
     
-    out = patch_embedding(t)                                # ->[4, 56*56, 96]。4张图，56*56个patch，96维的embed
-    print('patch_embedding out shape = ', out.shape)
-    
-    out = swin_block_w_msa(out)                             # ->[4, 56*56, 96]。4张图，56*56个patch，96维的embed
-    out = swin_block_sw_msa(out)                            # ->[4, 56*56, 96]。4张图，56*56个patch，96维的embed
-    print('swin_block out shape = ', out.shape)
-    
-    out = patch_merging(out)                                # ->[4, (56/2)*(56/2), 96]。4张图，28*28个patch，96维的embed
-    print('patch_merging out shape = ', out.shape)
+    paddle.summary(model, (4, 3, 224, 224))
 
 if __name__ == '__main__':
     main()

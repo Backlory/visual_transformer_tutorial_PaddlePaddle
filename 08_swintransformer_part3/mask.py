@@ -49,7 +49,8 @@ def generate_mask(ws=4, shift_size=2, input_resolution=(8, 8)):
 
 def main():
     #mask = generate_mask()      #ws=7, shift_size=3, input_resolution=(56, 56)
-    mask = generate_mask(ws=7, shift_size=3, input_resolution=(56, 56))      #
+    #mask = generate_mask(ws=7, shift_size=3, input_resolution=(56, 56))      #
+    mask = generate_mask(ws=7, shift_size=3, input_resolution=(7, 7))      #
     print(mask.shape)
     mask = mask.cpu().numpy().astype('uint8')
     I, J, K = mask.shape
